@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="slate_950">#101820</color>
+    <color name="slate_800">#1F2A37</color>
+    <color name="slate_600">#52606D</color>
+    <color name="sand_100">#F4F1EA</color>
+    <color name="signal_orange">#FF9F1C</color>
+    <color name="signal_green">#2EC27E</color>
+    <color name="signal_red">#D64545</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

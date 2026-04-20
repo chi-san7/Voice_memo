@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Voice Memo</string>
+    <string name="title_voice_memo">音声メモ</string>
+    <string name="status_waiting">待機中です。「録音開始」で新しいメモを開始できます。</string>
+    <string name="status_recording">録音中です。終了するときは「録音停止」を実行してください。</string>
+    <string name="status_transcribing">録音を停止しました。文字起こし結果をまとめています。</string>
+    <string name="status_ready_to_save">文字起こしが完了しました。「保存」でテキストを保存できます。</string>
+    <string name="label_command_hint">音声コマンド: 録音開始 / 録音停止 / 保存</string>
+    <string name="label_status_title">状態</string>
+    <string name="label_transcript_title">文字起こし結果</string>
+    <string name="hint_transcript">ここに文字起こし結果が表示されます。</string>
+    <string name="button_start">録音開始</string>
+    <string name="button_stop">録音停止</string>
+    <string name="button_save">保存</string>
+    <string name="label_saved_path">保存先: Documents/VoiceMemo</string>
+</resources>
