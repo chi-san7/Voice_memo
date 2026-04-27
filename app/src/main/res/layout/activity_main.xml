@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:background="@color/slate_950"
     android:orientation="vertical"
-    android:padding="24dp">
+    android:padding="20dp">
 
     <TextView
         android:id="@+id/titleTextView"
@@ -12,81 +12,69 @@
         android:layout_height="wrap_content"
         android:text="@string/title_voice_memo"
         android:textColor="@color/sand_100"
-        android:textSize="30sp"
+        android:textSize="28sp"
         android:textStyle="bold" />
-
 
     <LinearLayout
         android:id="@+id/buttonContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="18dp"
+        android:layout_marginTop="16dp"
         android:gravity="center"
         android:orientation="horizontal"
-        android:weightSum="3">
+        android:weightSum="2">
 
         <Button
             android:id="@+id/startButton"
             android:layout_width="0dp"
-            android:layout_height="88dp"
+            android:layout_height="72dp"
             android:layout_marginEnd="12dp"
             android:layout_weight="1"
             android:backgroundTint="@color/signal_green"
             android:contentDescription="@string/button_start"
-            android:focusable="true"
             android:text="@string/button_start"
             android:textColor="@color/black"
-            android:textSize="26sp"
+            android:textSize="22sp"
             android:textStyle="bold" />
 
         <Button
             android:id="@+id/stopButton"
             android:layout_width="0dp"
-            android:layout_height="88dp"
-            android:layout_marginEnd="12dp"
+            android:layout_height="72dp"
             android:layout_weight="1"
             android:backgroundTint="@color/signal_red"
             android:contentDescription="@string/button_stop"
-            android:focusable="true"
             android:text="@string/button_stop"
             android:textColor="@color/white"
-            android:textSize="26sp"
-            android:textStyle="bold" />
-
-        <Button
-            android:id="@+id/saveButton"
-            android:layout_width="0dp"
-            android:layout_height="88dp"
-            android:layout_weight="1"
-            android:backgroundTint="@color/signal_orange"
-            android:contentDescription="@string/button_save"
-            android:focusable="true"
-            android:text="@string/button_save"
-            android:textColor="@color/black"
-            android:textSize="26sp"
+            android:textSize="22sp"
             android:textStyle="bold" />
     </LinearLayout>
 
     <TextView
-        android:id="@+id/statusTitleTextView"
+        android:id="@+id/stateTitleTextView"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:text="@string/label_status_title"
+        android:layout_marginTop="20dp"
+        android:text="@string/label_state_title"
         android:textColor="@color/sand_100"
-        android:textSize="22sp"
+        android:textSize="20sp"
         android:textStyle="bold" />
 
-    <TextView
-        android:id="@+id/statusTextView"
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="104dp"
         android:layout_marginTop="8dp"
         android:background="@color/slate_800"
-        android:padding="16dp"
-        android:text="@string/status_waiting"
-        android:textColor="@color/sand_100"
-        android:textSize="22sp" />
+        android:foregroundGravity="center">
+
+        <View
+            android:id="@+id/statusIndicatorView"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_gravity="center"
+            android:background="@drawable/status_indicator_idle"
+            android:contentDescription="@string/state_idle" />
+    </FrameLayout>
 
     <TextView
         android:id="@+id/transcriptTitleTextView"
@@ -95,27 +83,23 @@
         android:layout_marginTop="20dp"
         android:text="@string/label_transcript_title"
         android:textColor="@color/sand_100"
-        android:textSize="22sp"
+        android:textSize="20sp"
         android:textStyle="bold" />
 
-    <ScrollView
-        android:id="@+id/transcriptScrollView"
+    <TextView
+        android:id="@+id/transcriptTextView"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="8dp"
         android:layout_weight="1"
         android:background="@color/slate_800"
-        android:fillViewport="true">
-
-        <TextView
-            android:id="@+id/transcriptTextView"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="18dp"
-            android:text="@string/hint_transcript"
-            android:textColor="@color/sand_100"
-            android:textSize="24sp" />
-    </ScrollView>
+        android:ellipsize="end"
+        android:gravity="top|start"
+        android:maxLines="9"
+        android:padding="16dp"
+        android:text="@string/hint_transcript"
+        android:textColor="@color/sand_100"
+        android:textSize="22sp" />
 
     <TextView
         android:id="@+id/savedPathTextView"
@@ -123,7 +107,17 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:text="@string/label_saved_path"
-        android:textColor="@color/slate_600"
-        android:textSize="16sp" />
+        android:textColor="@color/slate_300"
+        android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/latestSaveTextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:maxLines="2"
+        android:text="@string/label_latest_save_empty"
+        android:textColor="@color/sand_100"
+        android:textSize="15sp" />
 
 </LinearLayout>

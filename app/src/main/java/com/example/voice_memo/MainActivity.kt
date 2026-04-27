@@ -17,6 +17,7 @@ import android.provider.MediaStore
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -33,16 +34,15 @@ import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
 
-    // 文字起こしと録音の両方で扱いやすい PCM 設定を利用する
     private val sampleRate = 16_000
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioEncoding = AudioFormat.ENCODING_PCM_16BIT
 
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
-    private lateinit var saveButton: Button
-    private lateinit var statusTextView: TextView
+    private lateinit var statusIndicatorView: View
     private lateinit var transcriptTextView: TextView
+    private lateinit var latestSaveTextView: TextView
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var audioRecord: AudioRecord? = null
@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private var wavAudioFile: File? = null
     private var currentTranscript = ""
     private var lastSavedUri: Uri? = null
+    private var hasAutoSavedCurrentSession = false
 
     private var isRecording = false
     private var isTranscriptionPending = false
@@ -66,7 +67,8 @@ class MainActivity : AppCompatActivity() {
                 startRecordingFlow()
             } else if (!allGranted) {
                 shouldAutoStartAfterPermission = false
-                showStatus("権限が許可されていないため録音を開始できません。")
+                latestSaveTextView.text = getString(R.string.message_permission_denied)
+                updateButtons()
             }
         }
 
@@ -76,15 +78,15 @@ class MainActivity : AppCompatActivity() {
 
         startButton = findViewById(R.id.startButton)
         stopButton = findViewById(R.id.stopButton)
-        saveButton = findViewById(R.id.saveButton)
-        statusTextView = findViewById(R.id.statusTextView)
+        statusIndicatorView = findViewById(R.id.statusIndicatorView)
         transcriptTextView = findViewById(R.id.transcriptTextView)
+        latestSaveTextView = findViewById(R.id.latestSaveTextView)
 
         startButton.setOnClickListener { startRecordingFlow() }
         stopButton.setOnClickListener { stopRecordingFlow() }
-        saveButton.setOnClickListener { saveTranscriptToMyFiles() }
 
-        showStatus(getString(R.string.status_waiting))
+        transcriptTextView.text = getString(R.string.hint_transcript)
+        latestSaveTextView.text = getString(R.string.label_latest_save_empty)
         updateButtons()
     }
 
@@ -106,15 +108,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            showStatus("この端末では SpeechRecognizer が利用できません。")
+            latestSaveTextView.text = getString(R.string.message_speech_not_available)
             return
         }
 
         currentTranscript = ""
         lastSavedUri = null
+        hasAutoSavedCurrentSession = false
         transcriptTextView.text = getString(R.string.hint_transcript)
+        latestSaveTextView.text = getString(R.string.message_recording_in_progress)
         isTranscriptionPending = true
-        showStatus(getString(R.string.status_recording))
         updateButtons()
 
         val sessionStamp = createTimestampForFile()
@@ -128,7 +131,10 @@ class MainActivity : AppCompatActivity() {
 
         val pipe = runCatching { ParcelFileDescriptor.createPipe() }.getOrElse { exception ->
             isTranscriptionPending = false
-            showStatus("音声認識の準備に失敗しました: ${exception.message}")
+            latestSaveTextView.text = getString(
+                R.string.message_audio_session_failed,
+                exception.message ?: getString(R.string.message_unknown_error)
+            )
             updateButtons()
             return
         }
@@ -162,7 +168,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        showStatus(getString(R.string.status_transcribing))
+        latestSaveTextView.text = getString(R.string.message_processing_transcript)
         stopAudioCapture()
         updateButtons()
 
@@ -170,9 +176,7 @@ class MainActivity : AppCompatActivity() {
         val wavFile = wavAudioFile
         if (rawFile != null && wavFile != null) {
             Thread {
-                runCatching {
-                    convertPcmToWav(rawFile, wavFile)
-                }
+                runCatching { convertPcmToWav(rawFile, wavFile) }
             }.start()
         }
     }
@@ -182,7 +186,7 @@ class MainActivity : AppCompatActivity() {
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioEncoding)
         if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
             isTranscriptionPending = false
-            showStatus("録音バッファの初期化に失敗しました。")
+            latestSaveTextView.text = getString(R.string.message_audio_buffer_failed)
             updateButtons()
             return
         }
@@ -198,7 +202,7 @@ class MainActivity : AppCompatActivity() {
         if (recorder.state != AudioRecord.STATE_INITIALIZED) {
             recorder.release()
             isTranscriptionPending = false
-            showStatus("マイクの初期化に失敗しました。")
+            latestSaveTextView.text = getString(R.string.message_mic_init_failed)
             updateButtons()
             return
         }
@@ -208,7 +212,7 @@ class MainActivity : AppCompatActivity() {
         if (rawFile == null || pipeWriteSide == null) {
             recorder.release()
             isTranscriptionPending = false
-            showStatus("録音セッションの初期化に失敗しました。")
+            latestSaveTextView.text = getString(R.string.message_session_init_failed)
             updateButtons()
             return
         }
@@ -237,7 +241,10 @@ class MainActivity : AppCompatActivity() {
             }.onFailure { exception ->
                 runOnUiThread {
                     isTranscriptionPending = false
-                    showStatus("録音中にエラーが発生しました: ${exception.message}")
+                    latestSaveTextView.text = getString(
+                        R.string.message_recording_failed,
+                        exception.message ?: getString(R.string.message_unknown_error)
+                    )
                     updateButtons()
                 }
             }
@@ -259,12 +266,34 @@ class MainActivity : AppCompatActivity() {
         audioPipeWriteSide = null
     }
 
-    private fun saveTranscriptToMyFiles() {
-        if (currentTranscript.isBlank()) {
-            Toast.makeText(this, "保存する文字起こし結果がありません。", Toast.LENGTH_SHORT).show()
+    private fun autoSaveTranscript(transcript: String, fallbackBody: String? = null) {
+        if (hasAutoSavedCurrentSession) {
             return
         }
 
+        val textToSave = transcript.trim().ifBlank {
+            fallbackBody ?: getString(R.string.text_no_transcript)
+        }
+
+        val saveResult = saveTranscriptToMyFiles(textToSave)
+        hasAutoSavedCurrentSession = true
+
+        saveResult.onSuccess { savedUri ->
+            lastSavedUri = savedUri
+            latestSaveTextView.text = getString(
+                R.string.label_latest_save,
+                extractDisplayName(savedUri)
+            )
+        }.onFailure { exception ->
+            latestSaveTextView.text = getString(
+                R.string.message_auto_save_failed,
+                exception.message ?: getString(R.string.message_unknown_error)
+            )
+            Toast.makeText(this, R.string.message_auto_save_failed_short, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun saveTranscriptToMyFiles(transcriptToSave: String): Result<Uri> {
         val fileName = "voice_memo_${createTimestampForFile()}.txt"
         val resolver = contentResolver
         val values = ContentValues().apply {
@@ -278,41 +307,52 @@ class MainActivity : AppCompatActivity() {
         }
 
         val targetUri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
-        if (targetUri == null) {
-            showStatus("保存先ファイルの作成に失敗しました。")
-            return
-        }
+            ?: return Result.failure(IllegalStateException(getString(R.string.message_save_file_failed)))
 
-        val audioPathText = wavAudioFile?.absolutePath ?: "未生成"
-        val saveResult = runCatching {
+        val audioPathText = wavAudioFile?.absolutePath ?: getString(R.string.text_audio_path_unavailable)
+        val writeResult = runCatching {
             resolver.openOutputStream(targetUri)?.bufferedWriter(Charsets.UTF_8).use { writer ->
-                writer?.apply {
-                    appendLine("音声メモ")
-                    appendLine("作成日時: ${createTimestampForDisplay()}")
-                    appendLine("録音ファイル: $audioPathText")
-                    appendLine()
-                    appendLine(currentTranscript.trim())
-                }
+                requireNotNull(writer)
+                writer.appendLine(getString(R.string.file_header_title))
+                writer.appendLine(getString(R.string.file_header_saved_at, createTimestampForDisplay()))
+                writer.appendLine(getString(R.string.file_header_audio_path, audioPathText))
+                writer.appendLine()
+                writer.appendLine(transcriptToSave)
             }
         }
 
-        if (saveResult.isFailure) {
+        if (writeResult.isFailure) {
             resolver.delete(targetUri, null, null)
-            showStatus("テキスト保存に失敗しました: ${saveResult.exceptionOrNull()?.message}")
-            return
+            return Result.failure(writeResult.exceptionOrNull()!!)
         }
 
         val completeValues = ContentValues().apply {
             put(MediaStore.MediaColumns.IS_PENDING, 0)
         }
         resolver.update(targetUri, completeValues, null, null)
-        lastSavedUri = targetUri
-        showStatus("保存が完了しました。My Files の Documents/VoiceMemo を確認してください。")
-        updateButtons()
+        return Result.success(targetUri)
+    }
+
+    private fun extractDisplayName(uri: Uri): String {
+        return contentResolver.query(
+            uri,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val index = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) {
+                cursor.getString(index)
+            } else {
+                uri.lastPathSegment ?: getString(R.string.label_latest_save_unknown)
+            }
+        } ?: (uri.lastPathSegment ?: getString(R.string.label_latest_save_unknown))
     }
 
     private fun createCompatibleSpeechRecognizer(): SpeechRecognizer {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        return if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
         ) {
             SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
@@ -323,9 +363,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildRecognitionListener(): RecognitionListener {
         return object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                showStatus(getString(R.string.status_recording))
-            }
+            override fun onReadyForSpeech(params: Bundle?) = Unit
 
             override fun onBeginningOfSpeech() = Unit
 
@@ -337,7 +375,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onError(error: Int) {
                 isTranscriptionPending = false
-                showStatus("文字起こしエラー: ${speechErrorToMessage(error)}")
+                val errorMessage = speechErrorToMessage(error)
+                transcriptTextView.text = getString(R.string.hint_transcript_failed, errorMessage)
+                autoSaveTranscript("", getString(R.string.file_body_transcript_failed, errorMessage))
                 updateButtons()
             }
 
@@ -349,16 +389,14 @@ class MainActivity : AppCompatActivity() {
 
                 currentTranscript = transcript
                 transcriptTextView.text =
-                    if (transcript.isBlank()) getString(R.string.hint_transcript) else transcript
+                    if (transcript.isBlank()) {
+                        getString(R.string.hint_transcript_empty)
+                    } else {
+                        transcript
+                    }
                 isTranscriptionPending = false
 
-                showStatus(
-                    if (transcript.isBlank()) {
-                        "文字起こし結果が取得できませんでした。もう一度お試しください。"
-                    } else {
-                        getString(R.string.status_ready_to_save)
-                    }
-                )
+                autoSaveTranscript(transcript)
                 updateButtons()
             }
 
@@ -393,8 +431,6 @@ class MainActivity : AppCompatActivity() {
     private fun requiredPermissions(): Array<String> {
         val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
 
-        // API 33 では MediaStore を使うため追加の保存権限は不要だが、
-        // 旧 API へ広げる場合に備えて条件付きで扱えるようにしている
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
             permissions += Manifest.permission.READ_EXTERNAL_STORAGE
         }
@@ -487,27 +523,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun speechErrorToMessage(error: Int): String {
         return when (error) {
-            SpeechRecognizer.ERROR_AUDIO -> "音声入力処理に失敗しました。"
-            SpeechRecognizer.ERROR_CLIENT -> "認識クライアントの状態が不正です。"
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "マイク権限が不足しています。"
+            SpeechRecognizer.ERROR_AUDIO -> getString(R.string.error_audio)
+            SpeechRecognizer.ERROR_CLIENT -> getString(R.string.error_client)
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> getString(R.string.error_permissions)
             SpeechRecognizer.ERROR_NETWORK,
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "音声認識サービスへ接続できませんでした。"
-            SpeechRecognizer.ERROR_NO_MATCH -> "認識できる音声が見つかりませんでした。"
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "音声認識サービスが使用中です。"
-            SpeechRecognizer.ERROR_SERVER -> "音声認識サービス側でエラーが発生しました。"
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "音声入力がタイムアウトしました。"
-            else -> "不明なエラーです。"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> getString(R.string.error_network)
+            SpeechRecognizer.ERROR_NO_MATCH -> getString(R.string.error_no_match)
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> getString(R.string.error_busy)
+            SpeechRecognizer.ERROR_SERVER -> getString(R.string.error_server)
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> getString(R.string.error_timeout)
+            else -> getString(R.string.message_unknown_error)
         }
     }
 
     private fun updateButtons() {
         startButton.isEnabled = !isRecording && !isTranscriptionPending
         stopButton.isEnabled = isRecording
-        saveButton.isEnabled = !isRecording && !isTranscriptionPending && currentTranscript.isNotBlank()
-    }
 
-    private fun showStatus(text: String) {
-        statusTextView.text = text
+        val indicatorBackground = if (isRecording) {
+            R.drawable.status_indicator_recording
+        } else {
+            R.drawable.status_indicator_idle
+        }
+        statusIndicatorView.setBackgroundResource(indicatorBackground)
+        statusIndicatorView.contentDescription = getString(
+            if (isRecording) R.string.state_recording else R.string.state_idle
+        )
     }
 
     private fun createTimestampForFile(): String {
