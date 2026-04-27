@@ -1,18 +1,18 @@
 package com.example.voice_memo
 
 import android.Manifest
-import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -21,22 +21,21 @@ import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
 
-    private val sampleRate = 16_000
-    private val channelConfig = AudioFormat.CHANNEL_IN_MONO
-    private val audioEncoding = AudioFormat.ENCODING_PCM_16BIT
+    private enum class VoiceInputMode {
+        NONE,
+        ANDROID_SPEECH,
+        REALWEAR_DICTATION
+    }
 
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
@@ -45,19 +44,28 @@ class MainActivity : AppCompatActivity() {
     private lateinit var latestSaveTextView: TextView
 
     private var speechRecognizer: SpeechRecognizer? = null
-    private var audioRecord: AudioRecord? = null
-    private var audioThread: Thread? = null
-    private var audioPipeWriteSide: ParcelFileDescriptor? = null
+    private var activeVoiceInputMode = VoiceInputMode.NONE
 
-    private var rawAudioFile: File? = null
-    private var wavAudioFile: File? = null
     private var currentTranscript = ""
     private var lastSavedUri: Uri? = null
     private var hasAutoSavedCurrentSession = false
-
     private var isRecording = false
     private var isTranscriptionPending = false
     private var shouldAutoStartAfterPermission = false
+
+    private val realWearDictationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_REALWEAR_DICTATION_RESULT -> {
+                    handleRealWearDictationSuccess(extractRealWearTranscript(intent))
+                }
+
+                ACTION_REALWEAR_DICTATION_ERROR -> {
+                    handleRealWearDictationError()
+                }
+            }
+        }
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -70,6 +78,11 @@ class MainActivity : AppCompatActivity() {
                 latestSaveTextView.text = getString(R.string.message_permission_denied)
                 updateButtons()
             }
+        }
+
+    private val realWearDictationLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            handleRealWearDictationActivityResult(result)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,14 +98,15 @@ class MainActivity : AppCompatActivity() {
         startButton.setOnClickListener { startRecordingFlow() }
         stopButton.setOnClickListener { stopRecordingFlow() }
 
+        registerRealWearDictationReceiver()
         transcriptTextView.text = getString(R.string.hint_transcript)
         latestSaveTextView.text = getString(R.string.label_latest_save_empty)
         updateButtons()
     }
 
     override fun onDestroy() {
+        unregisterReceiver(realWearDictationReceiver)
         super.onDestroy()
-        stopAudioCapture()
         destroySpeechRecognizer()
     }
 
@@ -107,60 +121,25 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (isRealWearDictationAvailable()) {
+            startRealWearDictationFlow()
+            return
+        }
+
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             latestSaveTextView.text = getString(R.string.message_speech_not_available)
             return
         }
 
-        currentTranscript = ""
-        lastSavedUri = null
-        hasAutoSavedCurrentSession = false
-        transcriptTextView.text = getString(R.string.hint_transcript)
+        resetSessionStateForNewCapture()
+        activeVoiceInputMode = VoiceInputMode.ANDROID_SPEECH
         latestSaveTextView.text = getString(R.string.message_recording_in_progress)
-        isTranscriptionPending = true
-        updateButtons()
-
-        val sessionStamp = createTimestampForFile()
-        val sessionDir = File(getExternalFilesDir(Environment.DIRECTORY_MUSIC), "voice_sessions")
-        if (!sessionDir.exists()) {
-            sessionDir.mkdirs()
-        }
-
-        rawAudioFile = File(sessionDir, "voice_$sessionStamp.pcm")
-        wavAudioFile = File(sessionDir, "voice_$sessionStamp.wav")
-
-        val pipe = runCatching { ParcelFileDescriptor.createPipe() }.getOrElse { exception ->
-            isTranscriptionPending = false
-            latestSaveTextView.text = getString(
-                R.string.message_audio_session_failed,
-                exception.message ?: getString(R.string.message_unknown_error)
-            )
-            updateButtons()
-            return
-        }
-
-        val readSide = pipe[0]
-        audioPipeWriteSide = pipe[1]
-
-        val recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.JAPAN.toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readSide)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, audioEncoding)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, sampleRate)
-        }
 
         destroySpeechRecognizer()
         speechRecognizer = createCompatibleSpeechRecognizer().also { recognizer ->
             recognizer.setRecognitionListener(buildRecognitionListener())
-            recognizer.startListening(recognizerIntent)
+            recognizer.startListening(createRecognizerIntent())
         }
-        readSide.close()
-
-        startAudioCapture()
     }
 
     private fun stopRecordingFlow() {
@@ -168,102 +147,25 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        latestSaveTextView.text = getString(R.string.message_processing_transcript)
-        stopAudioCapture()
-        updateButtons()
-
-        val rawFile = rawAudioFile
-        val wavFile = wavAudioFile
-        if (rawFile != null && wavFile != null) {
-            Thread {
-                runCatching { convertPcmToWav(rawFile, wavFile) }
-            }.start()
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startAudioCapture() {
-        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioEncoding)
-        if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
-            isTranscriptionPending = false
-            latestSaveTextView.text = getString(R.string.message_audio_buffer_failed)
-            updateButtons()
+        if (activeVoiceInputMode == VoiceInputMode.REALWEAR_DICTATION) {
+            latestSaveTextView.text = getString(R.string.message_realwear_dictation_in_progress)
             return
         }
 
-        val recorder = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            channelConfig,
-            audioEncoding,
-            max(minBufferSize * 2, sampleRate)
-        )
-
-        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            recorder.release()
-            isTranscriptionPending = false
-            latestSaveTextView.text = getString(R.string.message_mic_init_failed)
-            updateButtons()
-            return
-        }
-
-        val rawFile = rawAudioFile
-        val pipeWriteSide = audioPipeWriteSide
-        if (rawFile == null || pipeWriteSide == null) {
-            recorder.release()
-            isTranscriptionPending = false
-            latestSaveTextView.text = getString(R.string.message_session_init_failed)
-            updateButtons()
-            return
-        }
-
-        audioRecord = recorder
-        isRecording = true
-        updateButtons()
-
-        audioThread = Thread {
-            val buffer = ByteArray(max(minBufferSize, 4096))
-
-            runCatching {
-                FileOutputStream(rawFile).use { fileStream ->
-                    ParcelFileDescriptor.AutoCloseOutputStream(pipeWriteSide).use { pipeStream ->
-                        recorder.startRecording()
-                        while (isRecording) {
-                            val readSize = recorder.read(buffer, 0, buffer.size)
-                            if (readSize > 0) {
-                                fileStream.write(buffer, 0, readSize)
-                                pipeStream.write(buffer, 0, readSize)
-                            }
-                        }
-                        pipeStream.flush()
-                    }
-                }
-            }.onFailure { exception ->
-                runOnUiThread {
-                    isTranscriptionPending = false
-                    latestSaveTextView.text = getString(
-                        R.string.message_recording_failed,
-                        exception.message ?: getString(R.string.message_unknown_error)
-                    )
-                    updateButtons()
-                }
-            }
-        }.apply {
-            name = "voice-record-thread"
-            start()
-        }
-    }
-
-    private fun stopAudioCapture() {
         isRecording = false
+        isTranscriptionPending = true
+        latestSaveTextView.text = getString(R.string.message_processing_transcript)
+        updateButtons()
+        speechRecognizer?.stopListening()
+    }
 
-        runCatching { audioRecord?.stop() }
-        audioRecord?.release()
-        audioRecord = null
-
-        runCatching { audioThread?.join(1500) }
-        audioThread = null
-        audioPipeWriteSide = null
+    private fun createRecognizerIntent(): Intent {
+        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.JAPAN.toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, getString(R.string.message_recording_in_progress))
+        }
     }
 
     private fun autoSaveTranscript(transcript: String, fallbackBody: String? = null) {
@@ -309,13 +211,12 @@ class MainActivity : AppCompatActivity() {
         val targetUri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
             ?: return Result.failure(IllegalStateException(getString(R.string.message_save_file_failed)))
 
-        val audioPathText = wavAudioFile?.absolutePath ?: getString(R.string.text_audio_path_unavailable)
         val writeResult = runCatching {
             resolver.openOutputStream(targetUri)?.bufferedWriter(Charsets.UTF_8).use { writer ->
                 requireNotNull(writer)
                 writer.appendLine(getString(R.string.file_header_title))
                 writer.appendLine(getString(R.string.file_header_saved_at, createTimestampForDisplay()))
-                writer.appendLine(getString(R.string.file_header_audio_path, audioPathText))
+                writer.appendLine(getString(R.string.file_header_audio_path, getString(R.string.text_audio_path_unavailable)))
                 writer.appendLine()
                 writer.appendLine(transcriptToSave)
             }
@@ -351,13 +252,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createCompatibleSpeechRecognizer(): SpeechRecognizer {
-        return if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
-        ) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
-        } else {
-            SpeechRecognizer.createSpeechRecognizer(this)
+        return SpeechRecognizer.createSpeechRecognizer(this)
+    }
+
+    private fun startRealWearDictationFlow() {
+        resetSessionStateForNewCapture()
+        activeVoiceInputMode = VoiceInputMode.REALWEAR_DICTATION
+        latestSaveTextView.text = getString(R.string.message_realwear_dictation_in_progress)
+
+        val dictationIntent = Intent(ACTION_REALWEAR_DICTATION).apply {
+            putExtra(EXTRA_REALWEAR_SOURCE_PACKAGE, packageName)
+        }
+
+        try {
+            realWearDictationLauncher.launch(dictationIntent)
+        } catch (exception: ActivityNotFoundException) {
+            handleVoiceInputLaunchFailure(exception)
+        } catch (exception: SecurityException) {
+            handleVoiceInputLaunchFailure(exception)
         }
     }
 
@@ -371,10 +283,19 @@ class MainActivity : AppCompatActivity() {
 
             override fun onBufferReceived(buffer: ByteArray?) = Unit
 
-            override fun onEndOfSpeech() = Unit
+            override fun onEndOfSpeech() {
+                if (isRecording) {
+                    isRecording = false
+                    isTranscriptionPending = true
+                    latestSaveTextView.text = getString(R.string.message_processing_transcript)
+                    updateButtons()
+                }
+            }
 
             override fun onError(error: Int) {
+                isRecording = false
                 isTranscriptionPending = false
+                activeVoiceInputMode = VoiceInputMode.NONE
                 val errorMessage = speechErrorToMessage(error)
                 transcriptTextView.text = getString(R.string.hint_transcript_failed, errorMessage)
                 autoSaveTranscript("", getString(R.string.file_body_transcript_failed, errorMessage))
@@ -394,8 +315,10 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         transcript
                     }
-                isTranscriptionPending = false
 
+                isRecording = false
+                isTranscriptionPending = false
+                activeVoiceInputMode = VoiceInputMode.NONE
                 autoSaveTranscript(transcript)
                 updateButtons()
             }
@@ -422,6 +345,117 @@ class MainActivity : AppCompatActivity() {
         speechRecognizer = null
     }
 
+    private fun registerRealWearDictationReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(ACTION_REALWEAR_DICTATION_RESULT)
+            addAction(ACTION_REALWEAR_DICTATION_ERROR)
+        }
+        ContextCompat.registerReceiver(
+            this,
+            realWearDictationReceiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
+    }
+
+    private fun handleRealWearDictationActivityResult(result: ActivityResult) {
+        if (activeVoiceInputMode != VoiceInputMode.REALWEAR_DICTATION) {
+            return
+        }
+
+        val transcriptFromResult = extractRealWearTranscript(result.data)
+        if (transcriptFromResult.isNotBlank()) {
+            handleRealWearDictationSuccess(transcriptFromResult)
+            return
+        }
+
+        if (result.resultCode == Activity.RESULT_CANCELED) {
+            handleRealWearDictationError()
+        }
+    }
+
+    private fun handleRealWearDictationSuccess(transcript: String) {
+        if (activeVoiceInputMode != VoiceInputMode.REALWEAR_DICTATION) {
+            return
+        }
+
+        currentTranscript = transcript.trim()
+        transcriptTextView.text = if (currentTranscript.isBlank()) {
+            getString(R.string.hint_transcript_empty)
+        } else {
+            currentTranscript
+        }
+
+        isRecording = false
+        isTranscriptionPending = false
+        activeVoiceInputMode = VoiceInputMode.NONE
+        autoSaveTranscript(currentTranscript)
+        updateButtons()
+    }
+
+    private fun handleRealWearDictationError() {
+        if (activeVoiceInputMode != VoiceInputMode.REALWEAR_DICTATION) {
+            return
+        }
+
+        isRecording = false
+        isTranscriptionPending = false
+        activeVoiceInputMode = VoiceInputMode.NONE
+        transcriptTextView.text = getString(
+            R.string.hint_transcript_failed,
+            getString(R.string.message_realwear_dictation_cancelled)
+        )
+        autoSaveTranscript(
+            "",
+            getString(
+                R.string.file_body_transcript_failed,
+                getString(R.string.message_realwear_dictation_cancelled)
+            )
+        )
+        updateButtons()
+    }
+
+    private fun handleVoiceInputLaunchFailure(exception: Exception) {
+        isRecording = false
+        isTranscriptionPending = false
+        activeVoiceInputMode = VoiceInputMode.NONE
+        latestSaveTextView.text = getString(
+            R.string.message_audio_session_failed,
+            exception.message ?: getString(R.string.message_realwear_dictation_failed)
+        )
+        updateButtons()
+    }
+
+    private fun resetSessionStateForNewCapture() {
+        currentTranscript = ""
+        lastSavedUri = null
+        hasAutoSavedCurrentSession = false
+        isRecording = true
+        isTranscriptionPending = false
+        transcriptTextView.text = getString(R.string.hint_transcript)
+        updateButtons()
+    }
+
+    private fun isRealWearDictationAvailable(): Boolean {
+        val intent = Intent(ACTION_REALWEAR_DICTATION).apply {
+            putExtra(EXTRA_REALWEAR_SOURCE_PACKAGE, packageName)
+        }
+        return packageManager.resolveActivity(
+            intent,
+            PackageManager.ResolveInfoFlags.of(0L)
+        ) != null
+    }
+
+    private fun extractRealWearTranscript(intent: Intent?): String {
+        if (intent == null) {
+            return ""
+        }
+
+        return intent.getStringExtra(EXTRA_REALWEAR_TEXT)
+            ?: intent.getStringExtra(EXTRA_LEGACY_REALWEAR_TEXT)
+            ?: ""
+    }
+
     private fun hasRequiredPermissions(): Boolean {
         return requiredPermissions().all { permission ->
             ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
@@ -429,96 +463,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requiredPermissions(): Array<String> {
-        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
-
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
-            permissions += Manifest.permission.READ_EXTERNAL_STORAGE
+        return if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            arrayOf(
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            )
+        } else {
+            arrayOf(Manifest.permission.RECORD_AUDIO)
         }
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            permissions += Manifest.permission.WRITE_EXTERNAL_STORAGE
-        }
-
-        return permissions.toTypedArray()
-    }
-
-    private fun convertPcmToWav(rawFile: File, wavFile: File) {
-        val totalAudioLength = rawFile.length()
-        val totalDataLength = totalAudioLength + 36
-        val channels = 1
-        val byteRate = sampleRate * channels * 16 / 8
-
-        FileInputStream(rawFile).use { inputStream ->
-            FileOutputStream(wavFile).use { outputStream ->
-                writeWavHeader(
-                    outputStream = outputStream,
-                    totalAudioLength = totalAudioLength,
-                    totalDataLength = totalDataLength,
-                    sampleRate = sampleRate,
-                    channels = channels,
-                    byteRate = byteRate
-                )
-
-                val buffer = ByteArray(4096)
-                while (true) {
-                    val count = inputStream.read(buffer)
-                    if (count <= 0) {
-                        break
-                    }
-                    outputStream.write(buffer, 0, count)
-                }
-            }
-        }
-    }
-
-    private fun writeWavHeader(
-        outputStream: FileOutputStream,
-        totalAudioLength: Long,
-        totalDataLength: Long,
-        sampleRate: Int,
-        channels: Int,
-        byteRate: Int
-    ) {
-        val header = ByteArray(44)
-
-        header[0] = 'R'.code.toByte()
-        header[1] = 'I'.code.toByte()
-        header[2] = 'F'.code.toByte()
-        header[3] = 'F'.code.toByte()
-        header[4] = (totalDataLength and 0xff).toByte()
-        header[5] = (totalDataLength shr 8 and 0xff).toByte()
-        header[6] = (totalDataLength shr 16 and 0xff).toByte()
-        header[7] = (totalDataLength shr 24 and 0xff).toByte()
-        header[8] = 'W'.code.toByte()
-        header[9] = 'A'.code.toByte()
-        header[10] = 'V'.code.toByte()
-        header[11] = 'E'.code.toByte()
-        header[12] = 'f'.code.toByte()
-        header[13] = 'm'.code.toByte()
-        header[14] = 't'.code.toByte()
-        header[15] = ' '.code.toByte()
-        header[16] = 16
-        header[20] = 1
-        header[22] = channels.toByte()
-        header[24] = (sampleRate and 0xff).toByte()
-        header[25] = (sampleRate shr 8 and 0xff).toByte()
-        header[26] = (sampleRate shr 16 and 0xff).toByte()
-        header[27] = (sampleRate shr 24 and 0xff).toByte()
-        header[28] = (byteRate and 0xff).toByte()
-        header[29] = (byteRate shr 8 and 0xff).toByte()
-        header[30] = (byteRate shr 16 and 0xff).toByte()
-        header[31] = (byteRate shr 24 and 0xff).toByte()
-        header[32] = (channels * 16 / 8).toByte()
-        header[34] = 16
-        header[36] = 'd'.code.toByte()
-        header[37] = 'a'.code.toByte()
-        header[38] = 't'.code.toByte()
-        header[39] = 'a'.code.toByte()
-        header[40] = (totalAudioLength and 0xff).toByte()
-        header[41] = (totalAudioLength shr 8 and 0xff).toByte()
-        header[42] = (totalAudioLength shr 16 and 0xff).toByte()
-        header[43] = (totalAudioLength shr 24 and 0xff).toByte()
-
-        outputStream.write(header, 0, header.size)
     }
 
     private fun speechErrorToMessage(error: Int): String {
@@ -538,7 +490,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateButtons() {
         startButton.isEnabled = !isRecording && !isTranscriptionPending
-        stopButton.isEnabled = isRecording
+        stopButton.isEnabled = isRecording && activeVoiceInputMode == VoiceInputMode.ANDROID_SPEECH
 
         val indicatorBackground = if (isRecording) {
             R.drawable.status_indicator_recording
@@ -557,5 +509,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun createTimestampForDisplay(): String {
         return SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.JAPAN).format(Date())
+    }
+
+    companion object {
+        private const val ACTION_REALWEAR_DICTATION =
+            "com.realwear.wearhf.intent.action.DICTATION"
+        private const val ACTION_REALWEAR_DICTATION_RESULT =
+            "com.realwear.wearhf.intent.action.DICTATION_RESULT"
+        private const val ACTION_REALWEAR_DICTATION_ERROR =
+            "com.realwear.wearhf.intent.action.DICTATION_ERROR"
+        private const val EXTRA_REALWEAR_SOURCE_PACKAGE =
+            "com.realwear.wearhf.intent.extra.SOURCE_PACKAGE"
+        private const val EXTRA_REALWEAR_TEXT = "com.realwear.wearhf.intent.extra.TEXT"
+        private const val EXTRA_LEGACY_REALWEAR_TEXT = "result"
     }
 }

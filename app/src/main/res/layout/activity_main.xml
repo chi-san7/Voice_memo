@@ -62,15 +62,15 @@
 
     <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="104dp"
+        android:layout_height="45dp"
         android:layout_marginTop="8dp"
         android:background="@color/slate_800"
         android:foregroundGravity="center">
 
         <View
             android:id="@+id/statusIndicatorView"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
+            android:layout_width="45dp"
+            android:layout_height="45dp"
             android:layout_gravity="center"
             android:background="@drawable/status_indicator_idle"
             android:contentDescription="@string/state_idle" />
