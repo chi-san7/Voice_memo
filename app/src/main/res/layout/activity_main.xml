@@ -60,21 +60,33 @@
         android:textSize="20sp"
         android:textStyle="bold" />
 
-    <FrameLayout
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="45dp"
         android:layout_marginTop="8dp"
         android:background="@color/slate_800"
-        android:foregroundGravity="center">
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp">
 
         <View
             android:id="@+id/statusIndicatorView"
             android:layout_width="45dp"
             android:layout_height="45dp"
-            android:layout_gravity="center"
             android:background="@drawable/status_indicator_idle"
             android:contentDescription="@string/state_idle" />
-    </FrameLayout>
+
+        <TextView
+            android:id="@+id/recordingTimeTextView"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:text="@string/recording_time_initial"
+            android:textColor="@color/sand_100"
+            android:textSize="25sp"
+            android:textStyle="bold" />
+    </LinearLayout>
 
     <TextView
         android:id="@+id/transcriptTitleTextView"
@@ -97,7 +109,7 @@
         android:gravity="top|start"
         android:maxLines="9"
         android:padding="16dp"
-        android:text="@string/hint_transcript"
+        android:text="@string/hint_audio"
         android:textColor="@color/sand_100"
         android:textSize="22sp" />
 
