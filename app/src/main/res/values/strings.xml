@@ -18,7 +18,7 @@
     <string name="state_recording">&#x9332;&#x97F3;&#x4E2D;</string>
     <string name="state_idle">&#x505C;&#x6B62;&#x4E2D;</string>
     <string name="message_permission_denied">&#x30DE;&#x30A4;&#x30AF;&#x6A29;&#x9650;&#x304C;&#x306A;&#x3044;&#x305F;&#x3081;&#x9332;&#x97F3;&#x3092;&#x958B;&#x59CB;&#x3067;&#x304D;&#x307E;&#x305B;&#x3093;&#x3002;</string>
-    <string name="message_recording_in_progress">&#x9332;&#x97F3;&#x4E2D;&#x3067;&#x3059;&#x3002;RealWear &#x306E;&#x97F3;&#x58F0;&#x30B3;&#x30DE;&#x30F3;&#x30C9;&#x306F;&#x4E00;&#x6642;&#x505C;&#x6B62;&#x4E2D;&#x3067;&#x3059;&#x3002;</string>
+    <string name="message_recording_in_progress">&#x9332;&#x97F3;&#x4E2D;&#x3067;&#x3059;&#x3002;RealWear &#x306E;&#x97F3;&#x58F0;&#x30B3;&#x30DE;&#x30F3;&#x30C9;&#x306F;&#x4E00;&#x6642;&#x505C;&#x6B62;&#x4E2D;&#x3067;&#x3059;&#x3002;&#x30A2;&#x30AF;&#x30B7;&#x30E7;&#x30F3;&#x30DC;&#x30BF;&#x30F3;&#x3067;&#x505C;&#x6B62;&#x3067;&#x304D;&#x307E;&#x3059;&#x3002;</string>
     <string name="message_saving_audio">&#x505C;&#x6B62;&#x3057;&#x307E;&#x3057;&#x305F;&#x3002;&#x9332;&#x97F3;&#x97F3;&#x58F0;&#x3092;&#x4FDD;&#x5B58;&#x3057;&#x3066;&#x3044;&#x307E;&#x3059;&#x3002;</string>
     <string name="message_realwear_dictation_in_progress">RealWear &#x306E;&#x97F3;&#x58F0;&#x5165;&#x529B;&#x3092;&#x958B;&#x59CB;&#x3057;&#x307E;&#x3057;&#x305F;&#x3002;&#x30C7;&#x30D0;&#x30A4;&#x30B9;&#x5074;&#x3067;&#x78BA;&#x5B9A;&#x3059;&#x308B;&#x3068;&#x81EA;&#x52D5;&#x4FDD;&#x5B58;&#x3055;&#x308C;&#x307E;&#x3059;&#x3002;</string>
     <string name="message_realwear_dictation_cancelled">RealWear &#x306E;&#x97F3;&#x58F0;&#x5165;&#x529B;&#x3092;&#x30AD;&#x30E3;&#x30F3;&#x30BB;&#x30EB;&#x3057;&#x307E;&#x3057;&#x305F;&#x3002;</string>

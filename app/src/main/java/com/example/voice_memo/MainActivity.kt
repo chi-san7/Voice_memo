@@ -11,7 +11,9 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -75,6 +77,11 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // RealWear action button's default home behavior must be disabled
+        // before the app can receive keycode 500 events.
+        (findViewById<ViewGroup>(android.R.id.content).getChildAt(0))?.contentDescription =
+            REALWEAR_DISABLE_ACTION_BUTTON_HOME
+
         startButton = findViewById(R.id.startButton)
         stopButton = findViewById(R.id.stopButton)
         statusIndicatorView = findViewById(R.id.statusIndicatorView)
@@ -96,6 +103,25 @@ class MainActivity : AppCompatActivity() {
         stopRecordingTimer(resetDisplay = true)
         cleanupAudioCapture(deleteTempFile = true)
         releaseWearHFMicrophone()
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == REALWEAR_ACTION_BUTTON_KEY_CODE) {
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (
+            keyCode == REALWEAR_ACTION_BUTTON_KEY_CODE &&
+            isRecording &&
+            event.repeatCount == 0
+        ) {
+            stopRecordingFlow()
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     private fun startRecordingFlow() {
@@ -535,6 +561,8 @@ class MainActivity : AppCompatActivity() {
         private const val RECORDING_JOIN_TIMEOUT_MS = 2_000L
         private const val TIMER_UPDATE_INTERVAL_MS = 1_000L
         private const val WAV_HEADER_SIZE_BYTES = 44
+        private const val REALWEAR_ACTION_BUTTON_KEY_CODE = 500
+        private const val REALWEAR_DISABLE_ACTION_BUTTON_HOME = "hf_no_ptt_home"
 
         private const val ACTION_RELEASE_MIC =
             "com.realwear.wearhf.intent.action.RELEASE_MIC"
