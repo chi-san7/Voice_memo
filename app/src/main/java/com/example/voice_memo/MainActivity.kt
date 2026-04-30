@@ -1,7 +1,12 @@
 package com.example.voice_memo
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.ContentValues
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -11,15 +16,19 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.view.inputmethod.InputMethodManager
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -29,25 +38,65 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var modeSelectionContainer: View
+    private lateinit var operationContainer: View
+    private lateinit var onlineModeButton: Button
+    private lateinit var offlineModeButton: Button
+    private lateinit var changeModeButton: Button
+    private lateinit var modeDescriptionTextView: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
     private lateinit var statusIndicatorView: View
     private lateinit var recordingTimeTextView: TextView
-    private lateinit var transcriptTextView: TextView
+    private lateinit var textMemoEditText: EditText
+    private lateinit var savedPathTextView: TextView
     private lateinit var latestSaveTextView: TextView
 
     private var audioRecord: AudioRecord? = null
     private var recordingThread: Thread? = null
 
+    private var selectedMode = OperationMode.NONE
     private var lastSavedUri: Uri? = null
     private var activeRecordingFile: File? = null
     private var hasReleasedWearHFMic = false
     private var isRecording = false
+    private var isDictationInProgress = false
     private var shouldAutoStartAfterPermission = false
     private var recordingStartedAtMs = 0L
 
     @Volatile
     private var audioCaptureError: Throwable? = null
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private val dictationResultReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            if (!isDictationInProgress) {
+                return
+            }
+            when (intent?.action) {
+                ACTION_DICTATION_RESULT -> {
+                    val recognizedText = intent.getStringExtra(EXTRA_REALWEAR_TEXT).orEmpty().trim()
+                    isDictationInProgress = false
+                    if (recognizedText.isNotEmpty()) {
+                        applyDictationResult(recognizedText)
+                        latestSaveTextView.text = getString(
+                            R.string.label_text_input_completed,
+                            createTimestampForDisplay()
+                        )
+                    } else {
+                        latestSaveTextView.text = getString(R.string.label_transcription_error)
+                    }
+                    updateButtons()
+                }
+
+                ACTION_DICTATION_ERROR -> {
+                    isDictationInProgress = false
+                    latestSaveTextView.text = getString(R.string.label_transcription_error)
+                    updateButtons()
+                }
+            }
+        }
+    }
 
     private val recordingTimerUpdater = object : Runnable {
         override fun run() {
@@ -73,6 +122,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val dictationLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            handleDictationActivityResult(result)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -82,24 +136,66 @@ class MainActivity : AppCompatActivity() {
         (findViewById<ViewGroup>(android.R.id.content).getChildAt(0))?.contentDescription =
             REALWEAR_DISABLE_ACTION_BUTTON_HOME
 
+        modeSelectionContainer = findViewById(R.id.modeSelectionContainer)
+        operationContainer = findViewById(R.id.operationContainer)
+        onlineModeButton = findViewById(R.id.onlineModeButton)
+        offlineModeButton = findViewById(R.id.offlineModeButton)
+        changeModeButton = findViewById(R.id.changeModeButton)
+        modeDescriptionTextView = findViewById(R.id.modeDescriptionTextView)
         startButton = findViewById(R.id.startButton)
         stopButton = findViewById(R.id.stopButton)
         statusIndicatorView = findViewById(R.id.statusIndicatorView)
         recordingTimeTextView = findViewById(R.id.recordingTimeTextView)
-        transcriptTextView = findViewById(R.id.transcriptTextView)
+        textMemoEditText = findViewById(R.id.textMemoEditText)
+        savedPathTextView = findViewById(R.id.savedPathTextView)
         latestSaveTextView = findViewById(R.id.latestSaveTextView)
 
-        startButton.setOnClickListener { startRecordingFlow() }
-        stopButton.setOnClickListener { stopRecordingFlow() }
+        textMemoEditText.doAfterTextChanged {
+            if (selectedMode == OperationMode.ONLINE_TRANSCRIPTION && !isDictationInProgress) {
+                updateButtons()
+            }
+        }
 
-        transcriptTextView.text = getString(R.string.hint_audio)
-        latestSaveTextView.text = getString(R.string.label_latest_save_empty)
-        recordingTimeTextView.text = getString(R.string.recording_time_initial)
+        onlineModeButton.setOnClickListener { selectMode(OperationMode.ONLINE_TRANSCRIPTION) }
+        offlineModeButton.setOnClickListener { selectMode(OperationMode.OFFLINE_RECORDING) }
+        changeModeButton.setOnClickListener { showModeSelection() }
+        startButton.setOnClickListener {
+            when (selectedMode) {
+                OperationMode.OFFLINE_RECORDING -> startRecordingFlow()
+                OperationMode.ONLINE_TRANSCRIPTION -> startDictationFlow()
+                OperationMode.NONE -> Unit
+            }
+        }
+        stopButton.setOnClickListener {
+            when (selectedMode) {
+                OperationMode.OFFLINE_RECORDING -> stopRecordingFlow()
+                OperationMode.ONLINE_TRANSCRIPTION -> {
+                    if (isDictationInProgress) {
+                        cancelDictationFlow()
+                    } else {
+                        saveTextMemo()
+                    }
+                }
+                OperationMode.NONE -> Unit
+            }
+        }
+
+        registerReceiver(
+            dictationResultReceiver,
+            IntentFilter().apply {
+                addAction(ACTION_DICTATION_RESULT)
+                addAction(ACTION_DICTATION_ERROR)
+            },
+            RECEIVER_EXPORTED
+        )
+
+        showModeSelection()
         updateButtons()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        unregisterReceiver(dictationResultReceiver)
         stopRecordingTimer(resetDisplay = true)
         cleanupAudioCapture(deleteTempFile = true)
         releaseWearHFMicrophone()
@@ -189,10 +285,78 @@ class MainActivity : AppCompatActivity() {
         isRecording = true
         recordingStartedAtMs = SystemClock.elapsedRealtime()
         latestSaveTextView.text = getString(R.string.message_recording_in_progress)
-        transcriptTextView.text = getString(R.string.hint_audio_recording)
+        textMemoEditText.setText(getString(R.string.hint_audio_recording))
         startRecordingTimer()
         requestWearHFMicrophoneRelease()
         startAudioCapture(recorder, recordingFile, bufferSize.coerceAtLeast(DEFAULT_BUFFER_SIZE_BYTES))
+        updateButtons()
+    }
+
+    private fun startDictationFlow() {
+        if (isDictationInProgress) {
+            return
+        }
+
+        isDictationInProgress = true
+        textMemoEditText.requestFocus()
+        latestSaveTextView.text = getString(R.string.label_text_input_waiting)
+        updateButtons()
+
+        try {
+            dictationLauncher.launch(
+                Intent(ACTION_DICTATION).apply {
+                    putExtra(EXTRA_REALWEAR_SOURCE_PACKAGE, packageName)
+                }
+            )
+        } catch (_: ActivityNotFoundException) {
+            runCatching {
+                sendBroadcast(Intent(ACTION_DICTATION).apply {
+                    putExtra(EXTRA_REALWEAR_SOURCE_PACKAGE, packageName)
+                })
+            }.onFailure {
+                isDictationInProgress = false
+                showRealWearKeyboard()
+                latestSaveTextView.text = getString(R.string.label_text_input_keyboard)
+            }
+        }
+        updateButtons()
+    }
+
+    private fun handleDictationActivityResult(result: ActivityResult) {
+        if (!isDictationInProgress) {
+            return
+        }
+
+        if (result.resultCode != RESULT_OK) {
+            isDictationInProgress = false
+            latestSaveTextView.text = getString(R.string.label_transcription_error)
+            updateButtons()
+            return
+        }
+
+        val recognizedText = result.data?.getStringExtra(EXTRA_DICTATION_RESULT)
+            ?.takeIf { it.isNotBlank() }
+            ?: result.data?.getStringExtra(EXTRA_REALWEAR_TEXT)
+                ?.takeIf { it.isNotBlank() }
+
+        if (recognizedText != null) {
+            isDictationInProgress = false
+            applyDictationResult(recognizedText)
+            latestSaveTextView.text = getString(
+                R.string.label_text_input_completed,
+                createTimestampForDisplay()
+            )
+            updateButtons()
+        }
+    }
+
+    private fun cancelDictationFlow() {
+        if (!isDictationInProgress) {
+            return
+        }
+
+        isDictationInProgress = false
+        latestSaveTextView.text = getString(R.string.label_transcription_stopped)
         updateButtons()
     }
 
@@ -204,7 +368,7 @@ class MainActivity : AppCompatActivity() {
         isRecording = false
         stopRecordingTimer(resetDisplay = false)
         latestSaveTextView.text = getString(R.string.message_saving_audio)
-        transcriptTextView.text = getString(R.string.hint_audio_saving)
+        textMemoEditText.setText(getString(R.string.hint_audio_saving))
         updateButtons()
 
         Thread {
@@ -292,18 +456,17 @@ class MainActivity : AppCompatActivity() {
                 R.string.label_latest_save,
                 extractDisplayName(savedUri)
             )
-            transcriptTextView.text = getString(
-                R.string.hint_audio_saved,
-                createTimestampForDisplay()
-            )
+            textMemoEditText.setText(getString(R.string.hint_audio_saved, createTimestampForDisplay()))
         }.onFailure { exception ->
             latestSaveTextView.text = getString(
                 R.string.message_auto_save_failed,
                 exception.message ?: getString(R.string.message_unknown_error)
             )
-            transcriptTextView.text = getString(
-                R.string.hint_audio_failed,
-                exception.message ?: getString(R.string.message_unknown_error)
+            textMemoEditText.setText(
+                getString(
+                    R.string.hint_audio_failed,
+                    exception.message ?: getString(R.string.message_unknown_error)
+                )
             )
             Toast.makeText(this, R.string.message_auto_save_failed_short, Toast.LENGTH_SHORT).show()
         }
@@ -367,7 +530,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleCaptureFinishedWithoutAudio() {
         latestSaveTextView.text = getString(R.string.message_recording_empty)
-        transcriptTextView.text = getString(R.string.hint_audio_failed, getString(R.string.message_recording_empty))
+        textMemoEditText.setText(getString(R.string.hint_audio_failed, getString(R.string.message_recording_empty)))
         deleteTemporaryRecording()
         updateButtons()
     }
@@ -377,9 +540,11 @@ class MainActivity : AppCompatActivity() {
             R.string.message_recording_failed,
             exception.message ?: getString(R.string.message_unknown_error)
         )
-        transcriptTextView.text = getString(
-            R.string.hint_audio_failed,
-            exception.message ?: getString(R.string.message_unknown_error)
+        textMemoEditText.setText(
+            getString(
+                R.string.hint_audio_failed,
+                exception.message ?: getString(R.string.message_unknown_error)
+            )
         )
         deleteTemporaryRecording()
         updateButtons()
@@ -428,9 +593,164 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetSessionStateForNewCapture() {
         lastSavedUri = null
-        transcriptTextView.text = getString(R.string.hint_audio)
+        textMemoEditText.setText(getString(R.string.hint_audio))
         recordingTimeTextView.text = getString(R.string.recording_time_initial)
         updateButtons()
+    }
+
+    private fun applyDictationResult(recognizedText: String) {
+        val currentText = textMemoEditText.text?.toString()?.trim().orEmpty()
+        val nextText = when {
+            currentText.isBlank() ||
+                currentText == getString(R.string.hint_online) ||
+                currentText == getString(R.string.message_realwear_dictation_in_progress) ->
+                recognizedText
+            else -> "$currentText\n$recognizedText"
+        }
+        textMemoEditText.setText(nextText)
+        textMemoEditText.setSelection(textMemoEditText.text?.length ?: 0)
+    }
+
+    private fun showRealWearKeyboard() {
+        textMemoEditText.requestFocus()
+        textMemoEditText.setSelection(textMemoEditText.text?.length ?: 0)
+        val inputMethodManager = getSystemService(InputMethodManager::class.java)
+        inputMethodManager?.showSoftInput(textMemoEditText, InputMethodManager.SHOW_FORCED)
+    }
+
+    private fun saveTextMemo() {
+        if (selectedMode != OperationMode.ONLINE_TRANSCRIPTION) {
+            return
+        }
+
+        val textToSave = textMemoEditText.text?.toString()?.trim().orEmpty()
+        if (textToSave.isBlank()) {
+            latestSaveTextView.text = getString(R.string.message_text_empty)
+            updateButtons()
+            return
+        }
+
+        val saveResult = saveTextToMediaStore(textToSave)
+        saveResult.onSuccess { savedUri ->
+            lastSavedUri = savedUri
+            latestSaveTextView.text = getString(
+                R.string.label_latest_save,
+                extractDisplayName(savedUri)
+            )
+            Toast.makeText(this, R.string.message_text_saved_short, Toast.LENGTH_SHORT).show()
+        }.onFailure { exception ->
+            latestSaveTextView.text = getString(
+                R.string.message_text_save_failed,
+                exception.message ?: getString(R.string.message_unknown_error)
+            )
+            Toast.makeText(this, R.string.message_text_save_failed_short, Toast.LENGTH_SHORT).show()
+        }
+        updateButtons()
+    }
+
+    private fun saveTextToMediaStore(textToSave: String): Result<Uri> {
+        val fileName = "voice_memo_${createTimestampForFile()}.txt"
+        val resolver = contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            put(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                "${Environment.DIRECTORY_DOCUMENTS}/VoiceMemo"
+            )
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+
+        val targetUri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
+            ?: return Result.failure(IllegalStateException(getString(R.string.message_save_file_failed)))
+
+        val writeResult = runCatching {
+            resolver.openOutputStream(targetUri).use { output ->
+                requireNotNull(output)
+                output.writer(Charsets.UTF_8).use { writer ->
+                    writer.write(textToSave)
+                }
+            }
+        }
+
+        if (writeResult.isFailure) {
+            resolver.delete(targetUri, null, null)
+            return Result.failure(writeResult.exceptionOrNull()!!)
+        }
+
+        val completeValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_PENDING, 0)
+        }
+        resolver.update(targetUri, completeValues, null, null)
+        return Result.success(targetUri)
+    }
+
+    private fun selectMode(mode: OperationMode) {
+        selectedMode = mode
+        isDictationInProgress = false
+        if (isRecording) {
+            stopRecordingFlow()
+        } else {
+            cleanupAudioCapture(deleteTempFile = true)
+            releaseWearHFMicrophone()
+        }
+        stopRecordingTimer(resetDisplay = true)
+        lastSavedUri = null
+        activeRecordingFile = null
+        audioCaptureError = null
+
+        modeSelectionContainer.visibility = View.GONE
+        operationContainer.visibility = View.VISIBLE
+
+        when (mode) {
+            OperationMode.ONLINE_TRANSCRIPTION -> {
+                modeDescriptionTextView.text = getString(R.string.mode_online_description)
+                startButton.text = getString(R.string.button_start_online)
+                startButton.contentDescription = getString(R.string.command_input)
+                stopButton.visibility = View.VISIBLE
+                textMemoEditText.isEnabled = true
+                textMemoEditText.isFocusable = true
+                textMemoEditText.isFocusableInTouchMode = true
+                textMemoEditText.setText("")
+                textMemoEditText.hint = getString(R.string.hint_online)
+                savedPathTextView.text = getString(R.string.label_text_save_path)
+                latestSaveTextView.text = getString(R.string.label_text_input_ready)
+                recordingTimeTextView.text = getString(R.string.recording_time_not_applicable)
+            }
+
+            OperationMode.OFFLINE_RECORDING -> {
+                modeDescriptionTextView.text = getString(R.string.mode_offline_description)
+                startButton.text = getString(R.string.button_start)
+                startButton.contentDescription = getString(R.string.command_start)
+                stopButton.visibility = View.VISIBLE
+                textMemoEditText.isEnabled = false
+                textMemoEditText.isFocusable = false
+                textMemoEditText.isFocusableInTouchMode = false
+                textMemoEditText.setText(getString(R.string.hint_audio))
+                textMemoEditText.hint = null
+                savedPathTextView.text = getString(R.string.label_saved_path)
+                latestSaveTextView.text = getString(R.string.label_latest_save_empty)
+                recordingTimeTextView.text = getString(R.string.recording_time_initial)
+            }
+
+            OperationMode.NONE -> Unit
+        }
+
+        updateButtons()
+    }
+
+    private fun showModeSelection() {
+        selectedMode = OperationMode.NONE
+        isDictationInProgress = false
+        modeSelectionContainer.visibility = View.VISIBLE
+        operationContainer.visibility = View.GONE
+        textMemoEditText.isEnabled = false
+        textMemoEditText.isFocusable = false
+        textMemoEditText.isFocusableInTouchMode = false
+        textMemoEditText.setText(getString(R.string.hint_audio))
+        textMemoEditText.hint = null
+        latestSaveTextView.text = getString(R.string.label_latest_save_empty)
+        recordingTimeTextView.text = getString(R.string.recording_time_initial)
     }
 
     private fun hasRequiredPermissions(): Boolean {
@@ -452,17 +772,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtons() {
-        startButton.isEnabled = !isRecording
-        stopButton.isEnabled = isRecording
+        val hasTextMemo = !textMemoEditText.text?.toString()?.trim().isNullOrEmpty()
+        startButton.isEnabled = when (selectedMode) {
+            OperationMode.OFFLINE_RECORDING -> !isRecording
+            OperationMode.ONLINE_TRANSCRIPTION -> !isDictationInProgress
+            OperationMode.NONE -> false
+        }
+        stopButton.isEnabled = when (selectedMode) {
+            OperationMode.OFFLINE_RECORDING -> isRecording
+            OperationMode.ONLINE_TRANSCRIPTION -> isDictationInProgress || hasTextMemo
+            OperationMode.NONE -> false
+        }
+        changeModeButton.isEnabled = !isRecording && !isDictationInProgress
 
-        val indicatorBackground = if (isRecording) {
+        if (selectedMode == OperationMode.ONLINE_TRANSCRIPTION) {
+            if (isDictationInProgress) {
+                stopButton.text = getString(R.string.button_cancel_online)
+                stopButton.contentDescription = getString(R.string.command_cancel)
+            } else {
+                stopButton.text = getString(R.string.button_save_text)
+                stopButton.contentDescription = getString(R.string.command_save)
+            }
+        } else {
+            stopButton.text = getString(R.string.button_stop)
+            stopButton.contentDescription = getString(R.string.command_stop)
+        }
+
+        val isBusy = isRecording || isDictationInProgress
+        val indicatorBackground = if (isBusy) {
             R.drawable.status_indicator_recording
         } else {
             R.drawable.status_indicator_idle
         }
         statusIndicatorView.setBackgroundResource(indicatorBackground)
         statusIndicatorView.contentDescription = getString(
-            if (isRecording) R.string.state_recording else R.string.state_idle
+            if (isBusy) R.string.state_recording else R.string.state_idle
         )
     }
 
@@ -568,9 +912,24 @@ class MainActivity : AppCompatActivity() {
             "com.realwear.wearhf.intent.action.RELEASE_MIC"
         private const val ACTION_MIC_RELEASED =
             "com.realwear.wearhf.intent.action.MIC_RELEASED"
+        private const val ACTION_DICTATION =
+            "com.realwear.wearhf.intent.action.DICTATION"
+        private const val ACTION_DICTATION_RESULT =
+            "com.realwear.wearhf.intent.action.DICTATION_RESULT"
+        private const val ACTION_DICTATION_ERROR =
+            "com.realwear.wearhf.intent.action.DICTATION_ERROR"
         private const val EXTRA_REALWEAR_SOURCE_PACKAGE =
             "com.realwear.wearhf.intent.extra.SOURCE_PACKAGE"
         private const val EXTRA_REALWEAR_HIDE_TEXT =
             "com.realwear.wearhf.intent.extra.HIDE_TEXT"
+        private const val EXTRA_REALWEAR_TEXT =
+            "com.realwear.wearhf.intent.extra.TEXT"
+        private const val EXTRA_DICTATION_RESULT = "result"
+    }
+
+    private enum class OperationMode {
+        NONE,
+        ONLINE_TRANSCRIPTION,
+        OFFLINE_RECORDING
     }
 }
